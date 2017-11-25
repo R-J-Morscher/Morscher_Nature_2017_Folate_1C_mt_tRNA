@@ -1,0 +1,35 @@
+---
+title: "Load Data"
+author: "Lance Parsons <lparsons@princeton.edu>"
+date: "July 20, 2016"
+output: html_document
+---
+
+## Load all sample data into DESeq
+
+First we'll setup some variable to keep track of the input and output directories.
+
+```{r directory_setup}
+# Input and output directories
+data_dir <- "data"
+output_dir <- "output"
+dir.create(output_dir, showWarnings = FALSE)
+```
+
+We'll use a table we created in Excel to keep track of the samples, the files that contain the data for those samples, and any relevant experimental factors (*e.g.* treatment, batch, cell line, etc.)
+
+```{r sample_table}
+# Load sample table from csv (Excel) file
+sampleTable <- read.csv("sample_table.csv")
+sampleTable
+```
+
+Finally, we'll use that table to actually load the data into R using DESeq2.
+
+```{r load_data}
+# Load count data into DESeq2
+ddsFull <- DESeqDataSetFromHTSeqCount(sampleTable = sampleTable, 
+                                      directory = data_dir, 
+                                      design = ~1)
+ddsFull
+```

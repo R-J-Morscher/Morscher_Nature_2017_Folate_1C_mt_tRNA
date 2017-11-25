@@ -1,0 +1,577 @@
+---
+title: "Mitochondrial ribosome profiling analysis"
+author: "Sophia H. Li & Raphael J. Morscher"
+date: "09/18/2017"
+output:
+  html_document:
+    toc: true
+    theme: united
+
+---
+
+
+This R markdown file contains functions used to generate ribosome profiling graphs for Morscher et al. Nature 2017. 
+
+# Python code to generate codon count table for subseqeunt analysis in R
+
+ * Command line in terminal - 1: Generate count table
+python BAM_to_count_table.py --bam HCT116_SHMT2-1.bam --gff chrM_fixed.gff3 --fasta 170822_chrM.fa -o HCT116_SHMT2-1_codon_count.txt --add_three --offset 14 --min_length 25 --max_length 40 --threeprime
+
+ * Command line in terminal - 2: Collapse all tables from each sample into one for analysis in R
+python Collapse_codon_count_tables.py
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(cowplot)
+library(RColorBrewer)
+library(knitr)
+library(ggrepel)
+library(ineq)
+opts_chunk$set(cache=TRUE, echo=TRUE, results="asis", message=FALSE)
+```
+
+# Load and normalize data
+
+```{r load_data}
+
+raw_data <- read_tsv("D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/HCT116_WT_SHMT2_all_codon_count.txt")
+
+
+# Load the mapping where we can turn IDs into names that are easily identifiable 
+mito_info <-read_tsv("D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/Mitochondrial_Genome_Transcript_GeneInformation.txt") 
+
+
+condition1 <- "WT"
+condition2 <- "SHMT2"
+condition_to_analyze <- c(condition1,condition2)
+
+raw_data <- raw_data %>% 
+    left_join(.,mito_info,by = c("gene_id"="UCSC_id")) %>% select(gene_name = AssociatedGeneName,GeneType,sample,codon_seq:position_3_count,Complex)  %>% 
+  separate(sample, into= c("condition","replicate"),remove = FALSE,sep ="-") %>% 
+  filter(condition %in% condition_to_analyze)
+
+# Load the mitochondria codon table 
+mito_aminoacid_codon <- read_csv("D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/AA_Codon_HumMito.csv")
+
+mito_pallete = c("black","red")
+
+
+
+
+```
+
+
+```{r coverage_analysis}
+# use raw data to analyze the quality of riboseq data
+# coverage is defined as the percentage of codons that have at least one mapped read per gene
+# depth is defined as the average number of mapped reads per gene
+mito_data_raw_coverage <- raw_data %>% group_by(sample,gene_name,condition,replicate) %>% summarise(coverage = sum(codon_count_sum> 0)/n(), depth = sum(codon_count_sum)/n())
+mito_data_raw_coverage_bygene <- mito_data_raw_coverage %>% select(sample, gene_name,coverage) %>% 
+  spread(gene_name,coverage)
+
+write_csv(mito_data_raw_coverage_bygene, path = "D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/SHMT2_WT_Plots/mito_data_raw_coverage_bygene.csv") 
+
+mito_data_raw_depth_bygene <- mito_data_raw_coverage %>% select(sample, gene_name,depth) %>% 
+  spread(gene_name,depth)
+write_csv(mito_data_raw_depth_bygene, path = "D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/SHMT2_WT_Plots/mito_data_raw_depth_bygene.csv") 
+
+mito_data_raw_coverage_summary_bycondition <- mito_data_raw_coverage %>% group_by(condition) %>% summarise_at(vars(coverage),funs(mean,sd,min,max,median))
+write_csv(mito_data_raw_coverage_summary_bycondition, path = "D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/SHMT2_WT_Plots/mito_data_raw_coverage_summary_bycondition.csv")
+
+mito_data_raw_depth_summary_bycondition <- mito_data_raw_coverage %>% group_by(condition) %>% summarise_at(vars(depth),funs(mean,sd,min,max,median))
+write_csv(mito_data_raw_depth_summary_bycondition, path = "D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/SHMT2_WT_Plots/mito_data_raw_coverage_summary_bycondition.csv")
+
+
+```
+
+
+
+
+```{r normalizing_counts}
+
+# Normalize counts in each sample to RPM
+mito_data <- raw_data %>% select(-contains("position")) %>% group_by(sample,condition,replicate) %>%  
+  mutate(RPM = codon_count_sum/sum(codon_count_sum) * 10^6 + 1) %>% 
+  group_by(sample,gene_name) %>%  
+  mutate(RPM_normgene = RPM/sum(RPM),
+         RPM_cumsum = cumsum(RPM),
+         RPM_cumsum_normgene = RPM_cumsum/sum(RPM))  %>% 
+  mutate(condition = factor(condition,levels=c(condition1, condition2))) %>% 
+  mutate_at(vars(codon_seq),funs(toupper))
+
+# Summarise the replicates and generate cumsum. 
+mito_data_samplemean <- mito_data %>% group_by(condition,codon_index,gene_name,codon_seq) %>% 
+    summarise(RPM_samplemean = mean(RPM),
+              RPM_samplemean_se = sd(RPM)/sqrt(n()),
+              RPM_normgene_samplemean = mean(RPM_normgene),
+              RPM_normgene_samplemean_se = sd(RPM_normgene)/sqrt(n())) %>% 
+    group_by(condition,gene_name) %>% 
+    mutate(RPM_cumsum_samplemean = cumsum(RPM_samplemean),
+           RPM_cumsum_samplemean_se = cumsum(RPM_samplemean_se),
+           RPM_cumsum_samplemean_normgene = cumsum(RPM_samplemean)/sum(RPM_samplemean),
+           RPM_cumsum_samplemean_normgene_se = cumsum(RPM_samplemean_se)/sum(RPM_samplemean))
+```
+
+# Codon occupancy for each codon - to identify codons with translational defects manifesting as stalling
+
+```{r func_for_codon_occupancy}
+# This function takes the average of codon occupancy from each gene
+
+calc_codon_occupancy <- function(data){
+    codon_freq <- data %>% ungroup() %>% select(gene_name,codon_seq) %>% 
+        group_by(codon_seq) %>% 
+        summarise(codon_num = n()) %>% ungroup() %>% 
+        mutate(codon_freq = codon_num/sum(codon_num)) 
+    
+    occupancy_data <- data %>% group_by(gene_name,sample) %>% mutate(codon_num = n()) %>%
+        group_by(gene_name,sample,codon_seq) %>% 
+        summarise(codon_occupancy_pergene = sum(RPM_normgene)/(n()/mean(codon_num)),codon_count = n()) %>% 
+        group_by(sample,codon_seq) %>% 
+        summarise(codon_occupancy = mean(codon_occupancy_pergene,na.rm=TRUE))  %>% 
+        left_join(.,codon_freq,by="codon_seq") %>% 
+        left_join(.,mito_aminoacid_codon,by="codon_seq")
+    return(occupancy_data)
+}
+
+summarise_codonoccupancy <- function(data){
+    data_summary <- data %>% separate(sample,c("condition","replicate"),sep="-") %>% 
+        group_by(condition,codon_seq,aminoacid) %>% 
+        summarise(avg_codon_occupancy = mean(codon_occupancy),
+                  sd_codon_occupancy = sd(codon_occupancy),
+                  se_codon_occupancy = sd_codon_occupancy/sqrt(n())) %>% 
+      group_by(codon_seq,aminoacid) %>% 
+      mutate(occupancy_ratio = avg_codon_occupancy/avg_codon_occupancy[condition == condition1],
+             occupancy_ratio_se = occupancy_ratio * 
+               sqrt((se_codon_occupancy/avg_codon_occupancy)^2 + 
+                      (se_codon_occupancy[condition ==condition1]/avg_codon_occupancy[condition ==condition1])^2)) %>%
+      ungroup() %>% mutate(condition = factor(condition,levels = c(condition1,condition2)))
+    
+    return(data_summary)
+}
+
+plot_occupancy <- function(occupancy_data,plot_condition,plot_ratio,add_Met){
+  NNG <- c("AAA","AAG","TTA","TTG","CAA","CAG","GAA","GAG","TGA","TGG")
+  Met <- c("ATG","ATA")
+  occupancy_data <- occupancy_data %>% mutate(plot_type = case_when(!codon_seq %in% c(NNG,Met) ~"A", codon_seq %in% NNG ~ "B", codon_seq %in% Met ~ "C")) %>% unite(aa_codon,c("aminoacid","codon_seq"),sep = "-",remove = FALSE) 
+  plot_style <- list(geom_point(), 
+                     geom_hline(yintercept = 1),
+                     theme(axis.text.x = element_blank(),axis.ticks.x = element_blank(),legend.position = "none"),
+                     xlab(""))
+  
+  # if not plot ratio then we plot cell lines individually with the given input of plot_condition
+  if(missing(plot_ratio)){
+    output_plot <- occupancy_data %>%  filter(condition == plot_condition) %>% 
+      ggplot(aes(x=reorder(codon_seq,avg_codon_occupancy),y = avg_codon_occupancy,col = plot_type)) +
+      geom_errorbar(aes(ymin = avg_codon_occupancy - se_codon_occupancy, ymax = avg_codon_occupancy + se_codon_occupancy)) +
+      plot_style  + geom_text_repel(data = occupancy_data %>% filter(plot_type== "B"),aes(label=aa_codon)) + 
+      ylab("Codon occupancy")
+    return(output_plot)
+  }
+  if(plot_ratio){
+    occupancy_data <- occupancy_data  %>%  filter(!condition == condition1) 
+    output_plot <- occupancy_data %>% 
+      ggplot(aes(x=reorder(codon_seq,occupancy_ratio),y = occupancy_ratio,col = plot_type)) +
+      geom_errorbar(aes(ymin = occupancy_ratio - occupancy_ratio_se, ymax = occupancy_ratio + occupancy_ratio_se),col="black") +
+      plot_style + geom_text_repel(data = occupancy_data %>% filter(plot_type== "B"),aes(label=aa_codon),col = "black") +
+      scale_color_manual(values=c("black","#FF0000","black"))
+    if(add_Met){
+      output_plot <- output_plot + scale_color_manual(values=c("black","#FF0000","blue")) + 
+        geom_text_repel(data = occupancy_data %>% filter(plot_type=="C"),aes(label=aa_codon),col = "black")
+    }
+    return(output_plot) 
+  }
+}
+
+
+
+```
+
+
+```{r calc_codon_occupancy}
+mito_occupancy <- mito_data %>% calc_codon_occupancy(.)
+mito_occupancy_summary <- mito_occupancy %>% summarise_codonoccupancy(.)
+
+mito_occupancy_ratio_summary_plot <- mito_occupancy_summary %>% plot_occupancy(.,plot_ratio = T,add_Met = T) + 
+      ylab("Ratio of codon occupancy (SHMT2/WT)") + scale_y_continuous(limits = c(0,10))
+print(mito_occupancy_ratio_summary_plot)
+
+save_plot("D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/SHMT2_WT_Plots/Mito_occupancy_ratio_summary_plot.pdf",mito_occupancy_ratio_summary_plot,base_width = 9,base_height=5)
+
+```
+
+# Cumulative sum of codon counts for each gene - to visually identify effects of loss of tRNA modification and stalling sites
+
+```{r func_plot_cumsum}
+plot_cumsum <- function(cumsum_data,gene_name,w_facet_wrap){
+  plot_style = list( geom_line(),
+                     geom_ribbon(aes(linetype=NA, fill=condition, 
+                                     ymin =RPM_cumsum_samplemean - RPM_cumsum_samplemean_se, 
+                                     ymax = RPM_cumsum_samplemean + RPM_cumsum_samplemean_se),alpha=0.3),
+                     scale_y_continuous(labels = function(n) format(n,digits=2,scientific=T)),
+                     scale_color_manual(values = mito_pallete),
+                     scale_fill_manual(values = mito_pallete),
+                     theme(strip.background = element_blank(), aspect.ratio = 0.8)
+                     )
+  if(missing(w_facet_wrap)){
+    mitogenes_cumsum_plot <- cumsum_data  %>% ggplot(aes(x=codon_index,y=RPM_cumsum_samplemean,col=condition)) + 
+    plot_style + ggtitle(gene_name)
+    return(mitogenes_cumsum_plot)
+  }
+  if(w_facet_wrap){
+     mitogenes_cumsum_plot <- cumsum_data  %>% ggplot(aes(x=codon_index,y=RPM_cumsum_samplemean,col=condition)) + 
+    plot_style + facet_wrap(~gene_name,scales = "free") 
+  }
+  
+  return(mitogenes_cumsum_plot)
+}
+```
+
+```{r plot_cumsum}
+
+mito_data_samplemean_cumsum_plot_all_facet <- mito_data_samplemean %>% plot_cumsum(cumsum_data = .,w_facet_wrap = T)
+print(mito_data_samplemean_cumsum_plot_all_facet)
+
+save_plot(plot = mito_data_samplemean_cumsum_plot_all_facet, filename = "D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/SHMT2_WT_Plots/Cumsum_plot_samplemean_all_facet.pdf",base_height = 10, base_width =12)
+
+
+
+```
+
+
+# Stalling sites determination - to identify codons where ribosomes stall
+
+```{r calc_stalling_sites}
+
+# Normalize the RPM to the median of RPM per gene in each condition
+mito_data_samplemean <- mito_data_samplemean %>% group_by(gene_name,condition) %>% 
+  mutate(RPM_samplemean_normmedian = RPM_samplemean/median(RPM_samplemean)) %>% 
+  group_by(gene_name) %>%  
+  mutate(ratio = RPM_samplemean_normmedian/RPM_samplemean_normmedian[condition ==condition1]) 
+
+mito_data_samplemean_summary <- mito_data_samplemean %>% group_by(condition) %>% 
+  mutate(log_normmedian= log(RPM_samplemean_normmedian), log_ratio = log(ratio)) %>%
+  summarise_at(vars(log_normmedian,log_ratio),funs(mean,sd))
+
+calc_val <- function(mean_val,sd_val,multiplier_sd){
+  return(exp(mean_val + multiplier_sd * sd_val))
+}
+
+mito_data_samplemean_summary <- mito_data_samplemean_summary %>% mutate(
+  twosd_median = calc_val(log_normmedian_mean,log_normmedian_sd,2),
+  threesd_median = calc_val(log_normmedian_mean,log_normmedian_sd,3),
+  twosd_ratio = calc_val(log_ratio_mean,log_ratio_sd,2),
+  threesd_ratio = calc_val(log_ratio_mean,log_ratio_sd,3))
+
+mito_data_samplemean_sd_cutoff <- mito_data_samplemean %>% 
+  left_join(.,mito_data_samplemean_summary,by="condition") %>% mutate(
+  twosd_median = RPM_samplemean_normmedian > twosd_median,
+  threesd_median = RPM_samplemean_normmedian > threesd_median,
+  twosd_ratio = ratio > twosd_ratio,
+  threesd_ratio = ratio > threesd_ratio)
+
+mito_data_samplemean_summary_cond2 <- mito_data_samplemean_summary %>% filter(condition == condition2)
+
+mito_data_stalling_site_determination_plot <- mito_data_samplemean_sd_cutoff %>% filter(condition == condition2) %>% 
+  ggplot(aes(x = ratio, y = RPM_samplemean_normmedian)) + geom_point(size =2, col="grey") + 
+  geom_hline(yintercept = mito_data_samplemean_summary_cond2$twosd_median,linetype = 2, size = 1.4) + 
+  geom_hline(yintercept = mito_data_samplemean_summary_cond2$threesd_median,linetype = 2) + 
+  geom_vline(xintercept = mito_data_samplemean_summary_cond2$twosd_ratio,linetype = 2, size = 1.4) + 
+  geom_vline(xintercept = mito_data_samplemean_summary_cond2$threesd_ratio,linetype = 2) + 
+  geom_point(data = mito_data_samplemean_sd_cutoff %>% filter(condition == condition2,twosd_ratio, twosd_median),size = 2,col = "red") + 
+  scale_y_log10(limits = c(10^-3,10^3))  + scale_x_log10(limits = c(10^-1.8,10^1.8)) + 
+  xlab("Ratio of normalized RPM (SHMT2/WT)")  + ylab("Normalized RPM")
+
+print(mito_data_stalling_site_determination_plot)
+save_plot(filename = "D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/SHMT2_WT_Plots/mito_data_stalling_site_determination_2and3sd_plot.pdf",plot = mito_data_stalling_site_determination_plot,base_height = 10, base_width = 13)
+
+```
+
+
+
+# Determination of density of actively translating ribosomes - to estimate the relative level of active ribosomes bound to each gene
+
+```{r active_translation_ratio}
+
+# We define stalling site as those codons containing median-normalized RPM that are above the genome average by 2sds within each condition. We then remove those sites to assess the active translating ribosome levels.
+stalling_site <- mito_data_samplemean_sd_cutoff  %>% filter(twosd_median) %>% select(condition,gene_name,codon_index,codon_seq)
+
+mito_data_rm_stalling_countsum <- mito_data %>% anti_join(.,stalling_site) %>% 
+  group_by(condition, replicate, gene_name,Complex) %>% summarise(countsum=sum(RPM))
+
+mito_data_samplemean_rm_stalling_countsum <- mito_data_rm_stalling_countsum %>% 
+    group_by(condition, gene_name,Complex) %>% summarise_at(vars(countsum),funs(mean,sd,n())) %>% mutate(se = sd/sqrt(n))
+
+mito_data_samplemean_rm_stalling_countsum_ratio <- mito_data_samplemean_rm_stalling_countsum %>% 
+  group_by(gene_name,Complex) %>% 
+  mutate(ratio = mean/mean[condition == condition1], 
+         ratio_se = ratio * sqrt((se/mean)^2 +(se[condition == condition1]/mean[condition ==condition1])^2)) %>% 
+  filter(condition == condition2) %>% ungroup() %>% select(gene_name,Complex,ratio,ratio_se)
+
+mito_data_countsum_summary_condition1 <- mito_data_rm_stalling_countsum %>% filter(condition == condition1) %>% group_by(gene_name) %>% summarise(cond1_avg_count_sum = mean(countsum))
+mito_data_rm_stalling_countsum_ratio <- mito_data_rm_stalling_countsum %>% left_join(.,mito_data_countsum_summary_condition1) %>%
+  mutate(ratio = countsum/cond1_avg_count_sum) %>% filter(condition == condition2) 
+
+# This plot we also show the individual mutant ratio to the averaged wild type
+Gene_Ribosome_density_ratio_w_indiv <- mito_data_samplemean_rm_stalling_countsum_ratio %>%
+    ggplot(aes(x=reorder(gene_name,ratio),y=ratio,fill=Complex)) + 
+  geom_bar(stat="identity",col="black") +
+  geom_errorbar(aes(ymin = ratio - ratio_se , ymax = ratio + ratio_se),width = 0.3) +
+  geom_point(data = mito_data_rm_stalling_countsum_ratio,
+             aes(x = gene_name, y = ratio),show.legend = FALSE, size = 2)  + 
+  scale_fill_brewer(palette = "Set1") + 
+  theme(axis.text.x = element_text(angle= 45, hjust = 1),aspect.ratio = 0.6) +
+  scale_y_continuous(limits = c(0,1.5)) +
+  geom_hline(yintercept = 1,linetype =2) +
+  geom_hline(yintercept = 0) +
+  xlab("") + ylab("Relative abundance of translating ribosomes") 
+  
+print(Gene_Ribosome_density_ratio_w_indiv)
+save_plot("D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/SHMT2_WT_Plots/ActiveTranslatingRibosome_WTvsSHMT2_w_indiv_2sd_SHMT2_WT_sep.pdf",Gene_Ribosome_density_ratio_w_indiv,base_width = 7,base_height=5)
+write_csv(x = stalling_site, path = "D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/SHMT2_WT_Plots/stallingsites_2sd_SHMT2_WT.csv")
+
+```
+
+# Determine if stalling sites are enriched in transmembrane domain transitions using chi squared test
+
+```{r at_transition_analysis}
+
+# This function returns T or F depending on if the codon of interest is near the transition to transmembrane domain
+return_roi_window_pass_at_transition <- function(coi_gene,coi_ind,prob_data,num_flank_codon){
+  gene_data <- prob_data %>% filter(gene_name == coi_gene)
+  COI_neighbors_ind <- coi_ind + seq(-num_flank_codon,num_flank_codon,1)
+  COI <- tibble(codon_index = COI_neighbors_ind) %>% filter(codon_index > 0) 
+  gene_data <- gene_data %>% inner_join(.,COI, by = "codon_index") %>% ungroup() %>% select(-gene_name)
+  pass_cutoff <- sum(sum(gene_data$p_membr > 0.5)>0, sum(gene_data$p_membr < 0.5)>0) == 2
+  return(pass_cutoff)
+}
+
+num_flank_codon <- 5
+struc_prob <- read_csv("D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/mito_structure_probability.csv")
+
+
+
+return_chisquare_result <- function(target_sd_cutoff){
+  
+  stalling_sites <- read_csv("D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/170916_expectedstallingsites.csv") %>% filter(sd_cutoff >= target_sd_cutoff)
+  mito_genome <- read_tsv("D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/mito_genome.txt")
+
+NNG_sites <- mito_genome %>% filter(codon_seq %in% c("TTG","AAG")) %>% select(-codon_seq)
+  
+  NNG_sites_transition <- NNG_sites %>% rowwise() %>% 
+    mutate(at_transition = 
+             list(return_roi_window_pass_at_transition(prob_data = struc_prob, 
+                                                       coi_gene = gene_name, 
+                                                       coi_ind = codon_index,
+                                                       num_flank_codon = num_flank_codon))) %>% 
+    unnest() %>% rowwise() %>%  
+    left_join(stalling_sites %>% transmute(gene_name,codon_index,stalling_site = "stalled")) %>% 
+    replace_na(list(stalling_site = "notstalled"))
+  
+  chisq_table <- table(NNG_sites_transition$at_transition, NNG_sites_transition$stalling_site)
+  chisq_result <- chisq.test(NNG_sites_transition$at_transition, NNG_sites_transition$stalling_site,correct = F)
+  return(chisq_result)
+  
+  
+}
+
+chisq_result_two_sd <- return_chisquare_result(2) 
+chisq_result_three_sd <- return_chisquare_result(3) 
+
+
+```
+
+#  Metagene analysis for ribosome density distribution around codons of interest
+
+```{r func_metagene_analysis}
+return_roi_window <- function(coi_gene,coi_ind,data,num_flank_codon){
+# Return subset of data centering around the codon of interest
+  gene_data <- data %>% filter(gene_name == coi_gene)
+  COI_neighbors_ind <- coi_ind + seq(-num_flank_codon,num_flank_codon,1)
+  COI_neighbors_dist <- COI_neighbors_ind - coi_ind
+  COI <- tibble(codon_index = COI_neighbors_ind, dist_from_coi = COI_neighbors_dist) %>% filter(codon_index > 0) 
+  gene_data_return <- gene_data %>% inner_join(.,COI, by = "codon_index") %>% ungroup() %>% 
+    select(-gene_name) %>% group_by(condition) %>% 
+    mutate(RPM_normgene_samplemean_normROI = RPM_normgene_samplemean/sum(RPM_normgene_samplemean),
+           RPM_samplemean_normROI = RPM_samplemean/sum(RPM_samplemean))
+  return(gene_data_return)
+}
+
+return_metagene <- function(data){
+  metagene <- data %>% group_by(dist_from_coi) %>%
+    summarise_at(vars(RPM_samplemean_normROI,RPM_normgene_samplemean_normROI),funs(mean,median))  %>% 
+    mutate_each(funs(./mean(.)), contains(c("normROI")))
+  return(metagene)
+}
+
+return_COI_metagene <- function(data,codon_of_interest,num_flank_codon){
+  codon_data <- data %>% filter(codon_seq %in% codon_of_interest) %>% ungroup() %>% 
+    select(gene_name,codon_index,codon_seq) %>% unique()
+  codon_data <- codon_data %>% rowwise() %>% mutate(coi = list(return_roi_window(data = data, 
+                                                                                 coi_gene = gene_name, 
+                                                                                 coi_ind = codon_index,
+                                                                                 num_flank_codon = num_flank_codon)))
+  codon_data_metagene <- codon_data %>% ungroup() %>% unnest() %>% group_by(codon_seq,condition) %>% nest() %>% 
+    mutate(metagene = map(data,~return_metagene(.))) %>% select(-data) %>% unnest() 
+  return(codon_data_metagene)
+}
+
+plot_metagene <- function(metagene_data,codon_pair,y_value){
+  metagene_plot <- mito_data_samplemean_metagene %>% filter(codon_seq %in% codon_pair) %>% ggplot(aes_string( x = "dist_from_coi", y = y_value, alpha = "codon_seq", col = "condition")) + geom_point() + 
+    geom_line() + facet_wrap(~condition) + scale_color_manual(values = mito_pallete) + 
+    scale_y_continuous(limits = c(0,10)) + theme(strip.background = element_blank())
+  return(metagene_plot)
+}
+
+```
+
+
+
+```{r metagene_analysis}
+
+coi <- c("AAA","AAG","TTA","TTG")
+num_flank_codon <- 30
+mito_data_samplemean_metagene <- return_COI_metagene(mito_data_samplemean, coi, num_flank_codon)
+
+TTATTG_metagene_plot <- mito_data_samplemean_metagene %>% 
+  plot_metagene(.,codon_pair = c("TTA","TTG"),"RPM_samplemean_normROI_mean") 
+print(TTATTG_metagene_plot)
+AAAAAG_metagene_plot <- mito_data_samplemean_metagene %>% 
+  plot_metagene(.,codon_pair = c("AAA","AAG"),"RPM_samplemean_normROI_mean")
+print(AAAAAG_metagene_plot)
+
+
+save_plot(filename = paste0("D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/SHMT2_WT_Plots/TTATTG_metagene_plot_flank",num_flank_codon,"aa.pdf"),plot = TTATTG_metagene_plot, base_height = 5, base_width = 7)
+save_plot(filename = paste0("D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/SHMT2_WT_Plots/AAAAAG_metagene_plot_flank",num_flank_codon,"aa.pdf"),plot = AAAAAG_metagene_plot, base_height = 5, base_width = 7)
+
+
+
+```
+
+# Use DMS seq dataset from Rouskin S et al., Nature 2014 - to investigate potential mRNA secondary structures of mitochondrial genes
+
+```{r func_DMSseq_analysis}
+
+
+mito_info <-read_tsv("D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/Mitochondrial_Genome_Transcript_GeneInformation.txt") 
+mito_aminoacid_codon <- read_csv("D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/AA_Codon_HumMito.csv")
+
+read_raw_data <- function(path_to_file){
+  data <- read_tsv(path_to_file) %>% 
+  left_join(.,mito_info,by = c("gene_id"="UCSC_id")) %>% 
+  mutate_at(vars(codon_seq),funs(toupper)) %>% mutate(gene_name = AssociatedGeneName) %>%
+    select(gene_name,codon_seq,codon_index,position_1_count:position_3_count) %>% 
+    gather(key = position, value=dms_count, position_1_count:position_3_count) %>% 
+    arrange(gene_name,codon_index) %>% group_by(gene_name) %>% 
+    mutate(cumsum_dms_count = cumsum(dms_count),
+           nuc_index = seq_along(codon_seq),
+           norm_dms_count = dms_count/sum(dms_count)*1000,
+           cumsum_norm_dms_count = cumsum(norm_dms_count))
+}
+
+
+return_AC_only <- function(gene_data){
+  gene_codon = gene_data  %>% ungroup() %>% select(codon_seq,codon_index) %>% 
+    unique() %>% arrange(codon_index)
+  gene_codon_seq = paste(gene_codon$codon_seq,collapse = "",sep = "")
+  AC_ind <- grep("[A,C]",strsplit(gene_codon_seq,"")[[1]])
+  gene_AC = gene_data %>% filter(nuc_index %in% AC_ind) %>%
+    group_by(type) %>% mutate(norm_AC_dms = dms_count/sum(dms_count),cumsum_AC = cumsum(norm_AC_dms))
+  return(gene_AC)
+}
+
+return_window <- function(nuc_ind,AC_window_size,step_size){
+  num_row = length(nuc_ind)
+  start_row = seq(1,num_row-AC_window_size + 1,step_size)
+  end_row = start_row + AC_window_size - 1
+  return(tibble(start = nuc_ind[start_row],end = nuc_ind[end_row]))
+}
+
+return_subcolumn <- function(gene_data,start,end){
+  return(gene_data %>% filter(nuc_index %in% seq(start,end)))
+}
+
+return_r_value <- function(data){
+  roi_spread = data %>% select(nuc_index,norm_dms_count,type) %>% spread(type,norm_dms_count)
+  r_value = cor(roi_spread$vivo,roi_spread$denature)
+  return(r_value)
+}
+
+return_gini_diff <- function(data){
+  roi_spread = data %>% select(nuc_index,norm_dms_count,type) %>% spread(type,norm_dms_count)
+  gini_vivo <- ineq(roi_spread$vivo)
+  gini_denature <- ineq(roi_spread$denature)
+  return(gini_vivo - gini_denature)
+}
+
+calc_structure <- function(gene_data, AC_window_size,step_size){
+  gene_data_ac = gene_data  %>% return_AC_only(.)
+  nuc_ind = unique(gene_data$nuc_index)
+  gene_windows = return_window(nuc_ind,AC_window_size,step_size) 
+  gene_windows = gene_windows %>% rowwise() %>% mutate(data = list(return_subcolumn(gene_data,start,end)))
+  gene_data_calc =  gene_windows %>% mutate(r_val = return_r_value(data),gini_diff = return_gini_diff(data))
+  return(gene_data_calc)
+}
+
+plot_structure <- function(data,gene){
+   data %>% ggplot(aes(x = gini_diff, y = r_val)) + geom_point() + ggtitle(gene) + geom_hline(yintercept = 0.55) + geom_vline(xintercept = 0.14)
+}
+
+calc_all_structure <- function(data_ac, AC_window_size,step_size,rm_zero,r_val_cutoff,gini_diff_cutoff){
+  if(rm_zero){
+    data_ac = data_ac  %>% group_by(gene_name,nuc_index) %>% filter(!sum(dms_count==0)>0)
+  }
+  data_calc <- data_ac  %>% group_by(gene_name) %>% nest() %>% 
+    mutate(struc_calc = map(data, ~calc_structure(., AC_window_size,step_size)))
+  cutoff_criteria =  expression(gini_diff > gini_diff_cutoff & r_val < r_val_cutoff)
+  all_gini_r = data_calc %>% select(gene_name,struc_calc) %>% unnest() %>% 
+    mutate(pass_cutoff = eval(cutoff_criteria))
+  return(all_gini_r)
+}
+
+plot_all_structure <- function(data_gini_r){
+  
+  struc_plot <- data_gini_r %>% ggplot(aes(x = gini_diff, y = r_val)) + 
+    geom_point(size = 2) + geom_point(data = data_gini_r %>% filter(pass_cutoff== TRUE ),
+                              aes(x = gini_diff, y = r_val,col = gene_name),size = 2)  +
+    geom_hline(yintercept = c(r_val_cutoff)) + geom_vline(xintercept = c(gini_diff_cutoff)) + 
+    scale_color_brewer(palette = "Paired") + xlab("Gini difference") + ylab("r value") + 
+    scale_y_continuous(breaks = seq(0,1,0.2),limits = c(0,1)) + 
+    scale_x_continuous(limits = c(-0.2,0.4)) + theme(aspect.ratio = 1)
+  return(struc_plot)
+}
+
+
+
+
+```
+
+
+
+
+
+```{r DMSseq_analysis}
+
+mito_RNA_vivo <- read_raw_data("D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/Mito_K562_vivo_RNA_count_table.txt") %>% 
+  mutate(type = "vivo")
+mito_RNA_denatured <- read_raw_data("D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/Mito_K562_denatured_RNA_count_table.txt") %>% mutate(type = "denature")
+  
+mito_RNA <- bind_rows(mito_RNA_vivo,mito_RNA_denatured) %>% filter(!grepl("^MT-T",gene_name)) %>% ungroup() %>% mutate(gene_name = factor(gene_name,levels = rev(levels(factor(gene_name)))))
+
+
+##### We calculate all the r values and gini differences
+AC_window_size = 50 
+step_size = 10 
+r_val_cutoff = 0.75
+gini_diff_cutoff = 0.1
+all_gini_r <- mito_RNA %>% calc_all_structure(.,AC_window_size,step_size,rm_zero = FALSE,r_val_cutoff,gini_diff_cutoff)
+
+##### We plot the r value and gini difference of all the mitochondria genes including MT-RNR1 and 2
+
+mito_struc_plot <- all_gini_r %>% plot_all_structure(.)
+print(mito_struc_plot)
+
+save_plot(filename = paste0("D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/DMSseq/mito_struc_plot_K562_window",AC_window_size,"_step",step_size,".pdf"),mito_struc_plot,base_height = 7, base_width = 7)
+
+
+
+```

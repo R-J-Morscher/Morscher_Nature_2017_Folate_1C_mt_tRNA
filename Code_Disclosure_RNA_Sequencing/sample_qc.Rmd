@@ -1,0 +1,106 @@
+---
+title: "Sample QC"
+author: "Lance Parsons <lparsons@princeton.edu>"
+date: "May 11, 2015"
+output: html_document
+---
+```{r child='init_session.Rmd'}
+```
+
+```{r child='load_data.Rmd'}
+```
+
+## Select samples
+```{r select_samples}
+# Select samples where `batch` is `2015-10`
+dds <- ddsFull[ , ddsFull$batch == "2015-10" ]
+```
+
+## Normalize the samples
+Each column is divided by the geometric means of the rows. The median of these ratios (skipping the genes with a geometric mean of zero) is used as the size factor for this column.
+```{r normalize_samples}
+dds <- estimateSizeFactors(dds)
+dds@colData
+```
+
+## Regularized Log Transformation
+Transform the data to log space using DESeq2's "rlog transformation" which 
+stands for regularized log.  It transforms the average of the genes across 
+samples to a log2 scale but "pulls in" those genes for which the evidence 
+for strong fold changes is weak due to low counts. It does this by 
+transforming the original count data to the $log_2$ scale by fitting a model
+with a term for each sample and a prior distribution on the coefficients which
+is estimated from the data. 
+```{r rlog_transformation}
+rld <- rlogTransformation(dds, blind = TRUE)
+```
+
+## Heatmap of Count Matrix
+
+To explore a count matrix, it is often instructive to look at it as a heatmap.
+Below we show how to produce such a heatmap for the twenty (20) genes with the
+highest average counts.
+
+```{r count_matrix_heatmap}
+blues <- colorRampPalette(brewer.pal(9, "Blues"))(255)
+select <- order(rowMeans(counts(dds,normalized=TRUE)),decreasing=TRUE)[1:20]
+pheatmap(assay(rld)[select,],
+         color = blues,
+         cluster_rows=FALSE, 
+         show_rownames=TRUE,
+         cluster_cols=FALSE,
+         main="Regularized Log2 Counts (Top 20 Genes)")
+```
+
+## Sample Clustering
+
+One use of the transformed data is sample clustering. Here, we apply the
+dist function to the transpose of the transformed count matrix to get
+sample-to-sample distances. We could alternatively use the variance stabilized
+transformation here.
+
+```{r sample_distance}
+sampleDists <- dist(t(assay(rld)))
+sampleDistMatrix <- as.matrix(sampleDists)
+```
+
+A heatmap of this distance matrix gives us an overview over similarities and dissimilarities between samples.
+```{r sample_heatmap}
+rownames(sampleDistMatrix) <- colnames(rld)
+colnames(sampleDistMatrix) <- colnames(rld)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=blues,
+         annotation_col = as.data.frame(colData(dds)[c("genotype", "sample")]),
+         main="Sample Distance Heatmap")
+```
+
+Related to the distance matrix above, a PCA plot shows the samples in the 2D
+plane spanned by their first two principal components. This type of plot is
+useful for visualizing the overall effect of experimental covariates and batch
+effects.
+
+```{r sample_pca}
+# Use the intgroup variable for grouping
+pca_plot <- plotPCA(rld, intgroup = c("sample"))
+pca_plot + 
+    # Use rownames for labels
+    aes(label = rownames(rld@colData)) +
+    geom_text(hjust = 0, nudge_x = 0.75)
+```
+
+<!-- Uncomment these lines after downloading the R Script output from the
+# 5' 3' Bias
+Output from RSeQC tool, 'Gene Body Coverage' (run on Galaxy)
+```{r gene_body_covearage,fig.width=8,fig.height=8}
+# "Gene body coverage" RSeQC tool on Galaxy
+#gene_body_coverage_script_filename <- Sys.glob(file.path(data_dir, '*R_Script*.txt'))
+#gene_body_coverage_script <- system2("sed", sprintf(" -E '/^pdf|^dev\\.off/ s/^/#/' \"%s\"", gene_body_coverage_script_filename), stdout=TRUE)
+#eval(parse(text=gene_body_coverage_script))
+```
+-->
+
+```{r sessionInfo}
+sessionInfo()
+```

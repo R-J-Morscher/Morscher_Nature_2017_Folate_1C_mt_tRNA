@@ -1,0 +1,200 @@
+---
+title: "Mitochondrial ribosome profiling analysis"
+author: "Sophia H. Li & Raphael J. Morscher"
+date: "09/18/2017"
+output:
+  html_document:
+    toc: true
+    theme: united
+
+---
+
+
+This R markdown file contains  functions used to generate ribosome profiling graphs for Morscher et al. Nature 2017. 
+
+# Python code to generate codon count table for subseqeunt analysis in R
+
+ * Command line in terminal - 1: Generate count table
+python BAM_to_count_table.py --bam xxxx-1.bam --gff chrM_fixed.gff3 --fasta 170822_chrM.fa -o xxxx-1_codon_count.txt --add_three --offset 14 --min_length 25 --max_length 40 --threeprime
+
+ * Command line in terminal - 2: Collapse all tables from each sample into one for analysis in R
+python Collapse_codon_count_tables.py
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(cowplot)
+library(RColorBrewer)
+library(knitr)
+library(ggrepel)
+library(ineq)
+opts_chunk$set(cache=TRUE, echo=TRUE, results="asis", message=FALSE)
+```
+
+# Load and normalize data
+
+```{r load_data}
+
+raw_data <- read_tsv("D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/Sarcosine_rescue_collapsed_codon_count_table.txt")
+
+
+# Load the mapping where we can turn IDs into names that are easily identifiable 
+mito_info <-read_tsv("D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/Mitochondrial_Genome_Transcript_GeneInformation.txt") 
+
+
+condition1 <- "WT"
+condition2 <- "T2D2S"
+condition_to_analyze <- c(condition1,condition2)
+
+raw_data <- raw_data %>% 
+    left_join(.,mito_info,by = c("gene_id"="UCSC_id")) %>% select(gene_name = AssociatedGeneName,GeneType,sample,codon_seq:position_3_count,Complex)  %>% 
+  separate(sample, into= c("condition","replicate"),remove = FALSE,sep ="-") %>% 
+  filter(condition %in% condition_to_analyze)
+
+# Load the mitochondria codon table 
+mito_aminoacid_codon <- read_csv("D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/AA_Codon_HumMito.csv")
+
+mito_pallete = c("black","red")
+
+
+
+
+```
+
+
+```{r coverage_analysis}
+# use raw data to analyze the quality of riboseq data
+# coverage is defined as the percentage of codons that have at least one mapped read per gene
+# depth is defined as the average number of mapped reads per gene
+mito_data_raw_coverage <- raw_data %>% group_by(sample,gene_name,condition,replicate) %>% summarise(coverage = sum(codon_count_sum> 0)/n(), depth = sum(codon_count_sum)/n())
+mito_data_raw_coverage_bygene <- mito_data_raw_coverage %>% select(sample, gene_name,coverage) %>% 
+  spread(gene_name,coverage)
+
+write_csv(mito_data_raw_coverage_bygene, path = "D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/Sarcosine_Plots/mito_data_raw_coverage_bygene.csv") 
+
+mito_data_raw_depth_bygene <- mito_data_raw_coverage %>% select(sample, gene_name,depth) %>% 
+  spread(gene_name,depth)
+write_csv(mito_data_raw_depth_bygene, path = "D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/Sarcosine_Plots/mito_data_raw_depth_bygene.csv") 
+
+mito_data_raw_coverage_summary_bycondition <- mito_data_raw_coverage %>% group_by(condition) %>% summarise_at(vars(coverage),funs(mean,sd,min,max,median))
+write_csv(mito_data_raw_coverage_summary_bycondition, path = "D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/Sarcosine_Plots/mito_data_raw_coverage_summary_bycondition.csv")
+
+mito_data_raw_depth_summary_bycondition <- mito_data_raw_coverage %>% group_by(condition) %>% summarise_at(vars(depth),funs(mean,sd,min,max,median))
+write_csv(mito_data_raw_depth_summary_bycondition, path = "D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/Sarcosine_Plots/mito_data_raw_coverage_summary_bycondition.csv")
+
+
+```
+
+
+
+
+```{r normalizing_counts}
+
+# Normalize counts in each sample to RPM
+mito_data <- raw_data %>% select(-contains("position")) %>% group_by(sample,condition,replicate) %>%  
+  mutate(RPM = codon_count_sum/sum(codon_count_sum) * 10^6 + 1) %>% 
+  group_by(sample,gene_name) %>%  
+  mutate(RPM_normgene = RPM/sum(RPM),
+         RPM_cumsum = cumsum(RPM),
+         RPM_cumsum_normgene = RPM_cumsum/sum(RPM))  %>% 
+  mutate(condition = factor(condition,levels=c(condition1, condition2))) %>% 
+  mutate_at(vars(codon_seq),funs(toupper))
+
+# Summarise the replicates and generate cumsum. 
+mito_data_samplemean <- mito_data %>% group_by(condition,codon_index,gene_name,codon_seq) %>% 
+    summarise(RPM_samplemean = mean(RPM),
+              RPM_samplemean_se = sd(RPM)/sqrt(n()),
+              RPM_normgene_samplemean = mean(RPM_normgene),
+              RPM_normgene_samplemean_se = sd(RPM_normgene)/sqrt(n())) %>% 
+    group_by(condition,gene_name) %>% 
+    mutate(RPM_cumsum_samplemean = cumsum(RPM_samplemean),
+           RPM_cumsum_samplemean_se = cumsum(RPM_samplemean_se),
+           RPM_cumsum_samplemean_normgene = cumsum(RPM_samplemean)/sum(RPM_samplemean),
+           RPM_cumsum_samplemean_normgene_se = cumsum(RPM_samplemean_se)/sum(RPM_samplemean))
+```
+
+# Codon occupancy for each codon - to identify codons with translational defects manifesting as stalling
+
+```{r func_for_codon_occupancy}
+# This function takes the average of codon occupancy from each gene
+
+calc_codon_occupancy <- function(data){
+    codon_freq <- data %>% ungroup() %>% select(gene_name,codon_seq) %>% 
+        group_by(codon_seq) %>% 
+        summarise(codon_num = n()) %>% ungroup() %>% 
+        mutate(codon_freq = codon_num/sum(codon_num)) 
+    
+    occupancy_data <- data %>% group_by(gene_name,sample) %>% mutate(codon_num = n()) %>%
+        group_by(gene_name,sample,codon_seq) %>% 
+        summarise(codon_occupancy_pergene = sum(RPM_normgene)/(n()/mean(codon_num)),codon_count = n()) %>% 
+        group_by(sample,codon_seq) %>% 
+        summarise(codon_occupancy = mean(codon_occupancy_pergene,na.rm=TRUE))  %>% 
+        left_join(.,codon_freq,by="codon_seq") %>% 
+        left_join(.,mito_aminoacid_codon,by="codon_seq")
+    return(occupancy_data)
+}
+
+summarise_codonoccupancy <- function(data){
+    data_summary <- data %>% separate(sample,c("condition","replicate"),sep="-") %>% 
+        group_by(condition,codon_seq,aminoacid) %>% 
+        summarise(avg_codon_occupancy = mean(codon_occupancy),
+                  sd_codon_occupancy = sd(codon_occupancy),
+                  se_codon_occupancy = sd_codon_occupancy/sqrt(n())) %>% 
+      group_by(codon_seq,aminoacid) %>% 
+      mutate(occupancy_ratio = avg_codon_occupancy/avg_codon_occupancy[condition == condition1],
+             occupancy_ratio_se = occupancy_ratio * 
+               sqrt((se_codon_occupancy/avg_codon_occupancy)^2 + 
+                      (se_codon_occupancy[condition ==condition1]/avg_codon_occupancy[condition ==condition1])^2)) %>%
+      ungroup() %>% mutate(condition = factor(condition,levels = c(condition1,condition2)))
+    
+    return(data_summary)
+}
+
+plot_occupancy <- function(occupancy_data,plot_condition,plot_ratio,add_Met){
+  NNG <- c("AAA","AAG","TTA","TTG","CAA","CAG","GAA","GAG","TGA","TGG")
+  Met <- c("ATG","ATA")
+  occupancy_data <- occupancy_data %>% mutate(plot_type = case_when(!codon_seq %in% c(NNG,Met) ~"A", codon_seq %in% NNG ~ "B", codon_seq %in% Met ~ "C")) %>% unite(aa_codon,c("aminoacid","codon_seq"),sep = "-",remove = FALSE) 
+  plot_style <- list(geom_point(), 
+                     geom_hline(yintercept = 1),
+                     theme(axis.text.x = element_blank(),axis.ticks.x = element_blank(),legend.position = "none"),
+                     xlab(""))
+  
+  # if not plot ratio then we plot cell lines individually with the given input of plot_condition
+  if(missing(plot_ratio)){
+    output_plot <- occupancy_data %>%  filter(condition == plot_condition) %>% 
+      ggplot(aes(x=reorder(codon_seq,avg_codon_occupancy),y = avg_codon_occupancy,col = plot_type)) +
+      geom_errorbar(aes(ymin = avg_codon_occupancy - se_codon_occupancy, ymax = avg_codon_occupancy + se_codon_occupancy)) +
+      plot_style  + geom_text_repel(data = occupancy_data %>% filter(plot_type== "B"),aes(label=aa_codon)) + 
+      ylab("Codon occupancy")
+    return(output_plot)
+  }
+  if(plot_ratio){
+    occupancy_data <- occupancy_data  %>%  filter(!condition == condition1) 
+    output_plot <- occupancy_data %>% 
+      ggplot(aes(x=reorder(codon_seq,occupancy_ratio),y = occupancy_ratio,col = plot_type)) +
+      geom_errorbar(aes(ymin = occupancy_ratio - occupancy_ratio_se, ymax = occupancy_ratio + occupancy_ratio_se),col="black") +
+      plot_style + geom_text_repel(data = occupancy_data %>% filter(plot_type== "B"),aes(label=aa_codon),col = "black") +
+      scale_color_manual(values=c("black","#FF0000","black"))
+    if(add_Met){
+      output_plot <- output_plot + scale_color_manual(values=c("black","#FF0000","blue")) + 
+        geom_text_repel(data = occupancy_data %>% filter(plot_type=="C"),aes(label=aa_codon),col = "black")
+    }
+    return(output_plot) 
+  }
+}
+
+
+```
+
+
+```{r calc_codon_occupancy}
+mito_occupancy <- mito_data %>% calc_codon_occupancy(.)
+mito_occupancy_summary <- mito_occupancy %>% summarise_codonoccupancy(.)
+
+mito_occupancy_ratio_summary_plot <- mito_occupancy_summary %>% plot_occupancy(.,plot_ratio = T,add_Met = T) + 
+      ylab("Ratio of codon occupancy (T2D2/WT)") + scale_y_continuous(limits = c(0,12),breaks = seq(0,12,2))
+print(mito_occupancy_ratio_summary_plot)
+
+save_plot("D:/Sequencing_Data_1CTRNA/RiboSeqAnalysis_Resubmission/Sarcosine_Plots/Mito_occupancy_ratio_summary_plot.pdf",mito_occupancy_ratio_summary_plot,base_width = 9,base_height=5)
+
+```
+

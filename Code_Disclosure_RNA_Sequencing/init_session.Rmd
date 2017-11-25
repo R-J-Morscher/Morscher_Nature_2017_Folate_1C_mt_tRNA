@@ -1,0 +1,9 @@
+## Initialize Session
+
+Load the required packages into R.
+```{r message=FALSE}
+library(DESeq2)
+library(ggplot2)
+library(RColorBrewer)
+library(pheatmap)
+```

@@ -1,0 +1,67 @@
+---
+title: "RNA-Seq analysis using DESeq2"
+author: "Lance Parsons <lparsons@princeton.edu>"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+
+
+---
+
+This R markdown file contains  functions used to generate RNA-sequencing graphs for Morscher et al. Nature 2017. 
+
+
+
+```{r child='init_session.Rmd'}
+```
+
+```{r child='load_data.Rmd'}
+```
+
+
+## Select samples
+```{r select_samples}
+# Select samples where `batch` is `2015-10`
+dds <- ddsFull[ , ddsFull$batch == "2015-10" & ddsFull$colony %in% c("S9", "S7", "WTC")]
+```
+
+Sometimes it is necessary to drop levels of the factors, in case that all the
+samples for one or more levels of a factor in the design have been removed. If
+time were included in the design formula, the following code could be used to
+take care of dropped levels in this column.
+```{r droplevels}
+# Uncomment these lines if you selected a subset of samples above
+dds$colony <- droplevels( dds$colony )
+dds$genotype <- droplevels( dds$genotype )
+```
+
+## Setup Experimental Design
+
+### Setup design
+The experimental `design` defines the factors (attributes) of the model and how 
+they affect the transcription level. The `contrast` determines what factor and
+which values of that factor we want to compare to get a differntial epxression.
+
+Note that for this comparison, we are unable to account for colony differences,
+since the WT samples are all from one "colony".
+
+```{r setup_design}
+# Experimental Design
+design(dds) = ~ genotype
+
+# Contrast
+contrast <- c("genotype","knockout","WT")
+# Set base name for output files
+output_basename <- sprintf("%s_vs_%s_standard_analysis", contrast[2], contrast[3])
+```
+
+
+```{r child='deseq2_standard_analysis_core.Rmd'}
+```
+
+```{r child='annotate_results_orgdb.Rmd'}
+```
+
+## Display the version of R as well as any loaded packages.
+```{r sessionInfo}
+sessionInfo()
+```

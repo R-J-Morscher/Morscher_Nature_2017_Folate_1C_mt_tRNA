@@ -1,0 +1,41 @@
+---
+title: "RNA-Seq Results Annotation from OrgDB"
+author: "Lance Parsons <lparsons@princeton.edu>"
+date: "July 14, 2014"
+output: html_document
+---
+
+## Annotate results
+We now combined the results table with annotation data.
+```{r annotate_via_orgdb}
+require("AnnotationDbi")
+require("org.Hs.eg.db")
+
+# Configuration
+key_field = "ENSEMBL"
+cols <- c("SYMBOL", "ENTREZID", "GENENAME")
+for (col in cols) {
+    res[,col] <- mapIds(org.Hs.eg.db,
+                        keys=row.names(res),
+                        column=col,
+                        keytype=key_field,
+                        multiVals="first")
+}
+head(res)
+```
+
+### Write the results to a file
+```{r write_to_file}
+# First, concatenate the list elements into a string
+output_data <- as.data.frame(res)
+LIST_COLS <- sapply(output_data, is.list)
+for (COL in colnames(output_data)[LIST_COLS]) {
+    output_data[COL] <-sapply(output_data[COL],
+                              function(x)sapply(x, function(y) paste(unlist(y),collapse=", ") ) )
+}
+
+# Write the resulting data frame to a tab separated file
+write.table(output_data,
+            file=file.path(output_dir, paste(output_basename, "_results.txt", sep='')),
+            quote=FALSE, sep="\t", row.names=TRUE, col.names=NA)
+```

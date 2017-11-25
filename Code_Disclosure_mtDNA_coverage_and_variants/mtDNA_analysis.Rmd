@@ -1,0 +1,252 @@
+---
+title: "MT Figures"
+author: "Lance Parsons <lparsons@princeton.edu>"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Packages
+```{r load_packages, message=FALSE}
+library(Gviz)
+library(biomaRt)
+library(RColorBrewer)
+library(dplyr)
+library(readr)
+library(stringr)
+library(tidyr)
+library(magrittr)
+library(BSgenome.Hsapiens.NCBI.GRCh38)
+library(ggplot2)
+
+output_dir = 'results'
+dir.create(output_dir, showWarnings = FALSE)
+```
+
+## Setup Track Defaults
+
+```{r track_config}
+# Set this to allow for arbitrary chromosome identifiers
+options(ucscChromosomeNames = FALSE)
+
+# Genome Axis
+gtrack <- GenomeAxisTrack()
+
+# Set Region
+chr <- "MT"
+start <- 1
+end <- 16569
+
+# Sequence Track
+sTrack <- SequenceTrack(Hsapiens, chromosome = chr)
+sTrack
+
+# Gene Track
+ensembl = useMart("ensembl",dataset="hsapiens_gene_ensembl")
+biomTrack <- BiomartGeneRegionTrack(biomart = ensembl,
+     chromosome = chr, start = start, end = end,
+     name = "Genes", showId=TRUE, stacking = "squish",
+     shape="fixedArrow")
+
+
+# Colors
+trackColors <- c(brewer.pal(3, "Set1")[2], brewer.pal(3, "Set1")[1], "#333333")
+```
+
+## Normalized Log Tracks
+
+The coverage has two transformations applied:
+ 
+1.  **Normalization**. We used [deepTools](https://deeptools.github.io/) to 
+    normalize to 1x sequencing depth (also known as Reads Per Genomic Content 
+    (RPGC)). Sequencing depth is defined as: `(total number of mapped reads * 
+    fragment length) / effective genome size`. The effective genome size is the 
+    mappabile size of the genome. In this case, we used the legth of the 
+    mitochondrial sequence (16569). See the [docs for deepTools bamCoverage](http://deeptools.readthedocs.io/en/latest/content/tools/bamCoverage.html) 
+    for more info.
+
+2. **Log Transformation**. We then log transformed the data using log10(x+1).
+
+```{r norm_log_tracks, fig.width=10, fig.height=5, fig.path='results/', dev=c('png', 'pdf')}
+# Combined data tracks
+trackLevels <- c("m7", "S7", "WT")
+WTDataTrack <- DataTrack("data/coverage/WT_MT_1x_normalized_coverage.bigwig", 
+                         type='l', lwd=1,
+                         col=trackColors,
+                         transformation=function(x){log10(x+1)},
+                         groups = factor("WT", levels = trackLevels),
+                         name="Coverage")
+m7DataTrack <- DataTrack("data/coverage/m7_MT_1x_normalized_coverage.bigwig", 
+                         type='l', lwd=1,
+                         col=trackColors,
+                         transformation=function(x){log10(x+1)},
+                         groups = factor("m7", levels = trackLevels),
+                         name="Coverage")
+S7DataTrack <- DataTrack("data/coverage/S7_MT_1x_normalized_coverage.bigwig", 
+                         type='l', lwd=1,
+                         col=trackColors,
+                         transformation=function(x){log10(x+1)},
+                         groups = factor("S7", levels = trackLevels),
+                         name="Coverage")
+ot <- OverlayTrack(trackList = list(WTDataTrack, S7DataTrack, m7DataTrack))
+plotTracks(list(gtrack, ot, biomTrack),
+           chromosome = chr, from=start, to=end,
+           extend.left = 500,
+           main = "MT 1x Normalized Coverage (log10)", 
+           sizes = c(1, 4, 3))
+
+
+# Seperate data tracks
+m7DataTrack_solo <- DataTrack("data/coverage/m7_MT_1x_normalized_coverage.bigwig", 
+                         type='l', lwd=1,
+                         col=trackColors[1],
+                         transformation=function(x){log10(x+1)},
+                         name="m7")
+S7DataTrack_solo <- DataTrack("data/coverage/S7_MT_1x_normalized_coverage.bigwig", 
+                         type='l', lwd=1,
+                         col=trackColors[2],
+                         transformation=function(x){log10(x+1)},
+                         name="S7")
+WTDataTrack_solo <- DataTrack("data/coverage/WT_MT_1x_normalized_coverage.bigwig", 
+                         type='l', lwd=1,
+                         col=trackColors[3],
+                         transformation=function(x){log10(x+1)},
+                         name="WT")
+
+plotTracks(list(gtrack, m7DataTrack_solo, S7DataTrack_solo, WTDataTrack_solo, biomTrack),
+           chromosome = chr, from=start, to=end,
+           extend.left = 500,
+           main = "MT 1x Normalized Coverage (log10)", 
+           sizes = c(1, 2, 2, 2, 3))
+```
+
+## Load SNP data
+```{r snp_track_data}
+vcf <- read_tsv("data/variants/VCFtoTab-delimited_AF_0.1_variants.tabular")
+
+# Summary variant table
+vcf_range_table <- vcf %>%
+    dplyr::rename(START=POS) %>%
+    mutate(END=as.integer(START+str_length(REF)-1)) %>% 
+    mutate(AF=(DP_1-RO_1)/DP)  %>%
+    dplyr::select(CHROM, START, END) %>%
+    distinct(CHROM, START, END)
+
+vcf_ranges <- GRanges(seqnames=vcf_range_table$CHROM,
+                     ranges=IRanges(start=vcf_range_table$START,
+                                    end=vcf_range_table$END))
+
+sample_data_table <- vcf %>%
+    dplyr::rename(START=POS) %>%
+    mutate(END=as.integer(START+str_length(REF)-1)) %>% 
+    mutate(AF=(DP_1 - RO_1)/DP_1)  %>%
+    dplyr::select(CHROM, START, END, REF, ALT, SAMPLE, AF) %>%
+    spread(SAMPLE, AF)
+write_tsv(sample_data_table, file.path(output_dir, "AF_0.1_summary_variant_table.tsv"))
+
+
+# Expanded variant table
+max_alt_count <- max(str_count(vcf$ALT, ","))
+alt_col_names <- sprintf("ALT_%02d", 1:(max_alt_count+1))
+ao_col_names <- sprintf("AO_%02d", 1:(max_alt_count+1))
+tmp1 <- vcf %>%
+    dplyr::rename(START=POS) %>%
+    mutate(END=as.integer(START+str_length(REF)-1)) %>% 
+    separate(ALT, alt_col_names, ",", fill="right") %>%
+    gather(ALT_NUM, ALT_ALLELE, starts_with("ALT_")) %>%
+    dplyr::select(CHROM, START, END, REF, SAMPLE, DEPTH=DP_1, ALT_NUM, ALT_ALLELE) %>%
+    arrange(CHROM, START, ALT_NUM)
+
+tmp2 <- vcf %>%
+    dplyr::rename(START=POS) %>%
+    mutate(END=as.integer(START+str_length(REF)-1)) %>% 
+    separate(AO_1, alt_col_names, ",", fill="right") %>%
+    gather(ALT_NUM, AO_COUNT, starts_with("ALT_")) %>%
+    dplyr::select(CHROM, START, END, REF, SAMPLE, DEPTH=DP_1, ALT_NUM, AO_COUNT) %>%
+    arrange(CHROM, START, ALT_NUM)
+
+vcf_table <- 
+    full_join(tmp1, tmp2,
+              by=c("CHROM", "START", "END", "REF", "SAMPLE", "DEPTH", "ALT_NUM")) %>%
+    na.omit(AO_COUNT) %>%
+    filter(ALT_ALLELE!='.') %>%
+    dplyr::select(CHROM, START, END, REF, ALT_NUM, ALT_ALLELE, SAMPLE, AO_COUNT, DEPTH)
+rm(tmp1, tmp2)
+write_tsv(vcf_table, file.path(output_dir, "AF_0.1_full_variant_table.tsv"))
+
+# Sample data
+sample_data <- sample_data_table %>%
+    dplyr::select(-CHROM, -START, -END) %>%
+    dplyr::rename(`m7`=`m7-mDNA`, `S7`=`S7-mDNA`, `WT`=`wt-mDNA`)
+
+mcols(vcf_ranges) <- as.data.frame(sample_data)
+```
+
+### Coverage depth summary statistics
+```{r summary_stats, fig.path='results/', dev=c('png', 'pdf')}
+# Load coverage vectors
+WT_raw_coverage_bigwig <-
+    rtracklayer::import('data/coverage/WT_raw_coverage.bigwig')
+m7_raw_coverage_bigwig <-
+    rtracklayer::import('data/coverage/m7_raw_coverage.bigwig')
+S7_raw_coverage_bigwig <-
+    rtracklayer::import('data/coverage/S7_raw_coverage.bigwig')
+
+raw_coverage_table <- tibble(
+    WT = unlist(mapply(rep, 
+                       WT_raw_coverage_bigwig@elementMetadata$score,
+                       width(WT_raw_coverage_bigwig@ranges))),
+    m7 = unlist(mapply(rep, 
+                       m7_raw_coverage_bigwig@elementMetadata$score,
+                       width(m7_raw_coverage_bigwig@ranges))),
+    S7 = unlist(mapply(rep, 
+                       S7_raw_coverage_bigwig@elementMetadata$score,
+                       width(S7_raw_coverage_bigwig@ranges)))
+)
+
+# Some summary statistics
+summary(raw_coverage_table)
+
+ggplot(raw_coverage_table, aes(x=m7)) + geom_histogram(bins=30) + ggtitle("m7 Variant Coverage Depth")
+
+ggplot(raw_coverage_table, aes(x=S7)) + geom_histogram(bins=30) + ggtitle("S7 Variant Coverage Depth")
+
+ggplot(raw_coverage_table, aes(x=WT)) + geom_histogram(bins=30) + ggtitle("WT Variant Coverage Depth")
+```
+
+## Plot vcf tracks
+```{r plot_vcf_tracks, fig.width=20, fig.height=5, fig.path='results/', dev=c('png', 'pdf')}
+m7VcfTrack <- DataTrack(vcf_ranges[,"m7"],
+                        type = "h",
+                        col=trackColors,
+                        ylim=c(0, 1),
+                        legend=FALSE,
+                        groups = factor("m7", levels = trackLevels),
+                        name = "m7")
+
+S7VcfTrack <- DataTrack(vcf_ranges[,"S7"], 
+                        type = "h",
+                        ylim=c(0, 1),
+                        col=trackColors,
+                        legend=FALSE,
+                        groups = factor("S7", levels = trackLevels),
+                        name = "S7")
+
+WTVcfTrack <- DataTrack(vcf_ranges[,"WT"], 
+                        type = "h",
+                        col=trackColors,
+                        ylim=c(0, 1),
+                        legend=FALSE,
+                        groups = factor("WT", levels = trackLevels),
+                        name = "WT")
+
+plotTracks(list(gtrack, m7VcfTrack, S7VcfTrack, WTVcfTrack),
+           chromosome = chr, from=start, to=end,
+           main = "Alternate Allele Frequency per Sample",
+           #extend.left = 500,
+           #extend.right = 100,
+           sizes = c(1, 2, 2, 2))
+```

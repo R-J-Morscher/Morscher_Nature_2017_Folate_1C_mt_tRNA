@@ -1,0 +1,112 @@
+## Normalize the samples
+Each column is divided by the geometric means of the rows. The median of these ratios (skipping the genes with a geometric mean of zero) is used as the size factor for this column.
+```{r normalize}
+dds <- estimateSizeFactors(dds)
+dds@colData
+```
+
+### Write normalized counts to file
+You can read this back in with `read.csv(file=`r file.path(output_dir,
+sprintf("%s_normalized_counts.csv", output_basename))`, rownames = 1)`
+```{r}
+write.csv(counts(dds, normalized=TRUE), 
+            file=file.path(output_dir, sprintf("%s_normalized_counts.csv",
+                                               output_basename)))
+```
+
+
+## Estimate biological variance
+Using replicate data, this function obtains dispersion estimates for negative binomial distributed data.
+
+In the case of no replicates `estimateDispersions` will temporarily substitute a
+design formula ~ 1 for the purposes of dispersion estimation. This treats the
+samples as replicates for the purpose of dispersion estimation. As mentioned in
+the DESeq paper: "While one may not want to draw strong conclusions from such an
+analysis, it may still be useful for exploration and hypothesis generation."
+*See also modified analysis method*
+
+```{r estimateDispersions}
+dds <- estimateDispersions(dds)
+```
+
+Plotting the dispersion estimates is a useful diagnostic. The dispersion plot 
+shows the final estimates shrunk from the gene-wise estimates towards the
+fitted estimates. Some gene-wise estimates are flagged as outliers and not
+shrunk towards the fitted value, (this outlier detection is described in the
+man page for `estimateDispersionsMAP`). The amount of shrinkage depends on the
+sample size, the number of coefficients, the row mean and the variability of
+the gene-wise estimates.
+
+```{r plotDispEsts}
+plotDispEsts(dds, main=sprintf("%s Dispersion Estimates", output_basename))
+```
+
+
+## Determine differential expression, and visualize
+The `nbinomWaldTest` function tests for significance of coefficients in a negative binomial GLM, using previously calculated sizeFactors (or normalizationFactors) and dispersion estimates.
+
+```{r nbinomWaldTest}
+dds <- nbinomWaldTest(dds)
+```
+
+
+### Get results
+Extract results from a DESeq analysis giving base means across samples, log$_2$ fold changes, standard errors, test statistics, p-values and adjusted p-values. resultsNames finds available names for results.  Note that the results function performs independent filtering by default using the `genefilter` package.
+
+```{r results}
+res <- results(dds, contrast=contrast)
+sum(res$padj <= 0.05, na.rm=TRUE)
+sum(res$padj <= 0.1, na.rm=TRUE)
+res <- res[order(res$padj, -abs(res$log2FoldChange)),]
+head(res)
+```
+
+Note that some values in the results table can be set to NA, for either one of the following reasons:
+
+1. If within a row, all samples have zero counts, the baseMean column will be zero, and the log$_2$ fold change estimates, p value and adjusted p value will all be set to NA.
+
+2. If a row contains a sample with an extreme count outlier then the p value and adjusted p value are set to NA. These outlier counts are detected by Cook’s distance. Customization of this outlier filtering and description of functionality for replacement of outlier counts and refitting is described in Section 3.5,
+
+3. If a row is filtered by automatic independent filtering, based on low mean normalized count, then only the adjusted p value is set to NA. Description and customization of independent filtering is described in Section 3.8.
+
+Information about which variables and tests were used can be found by calling
+the function `mcols` on the results object.
+
+For a particular gene, a log$_2$ fold change of $−1$ for
+`condition_treated_vs_untreated` means that the treatment induces a change in
+observed expression level of $2^{−1} = 0.5$ compared to the untreated condition. If
+the variable of interest is continuous-valued, then the reported log$_2$ fold
+change is per unit of change of that variable.
+
+```{r mcols}
+mcols(res, use.names=TRUE)
+```
+
+### MA Plot
+For DESeq2, the function `plotMA` shows the log$_2$ fold changes attributable to a
+variable over the mean of normalized counts. By default, the last variable in
+the design formula is chosen, and points will be colored red if the adjusted
+p-value is less than 0.1. Points which fall out of the window are plotted as
+open triangles.
+
+Note that DESeq2 performs a shrinkage of log$_2$ fold changes resulting from the incorporation of zero-centered normal prior. The shrinkage is greater for the log$_2$ fold change estimates from genes with low counts and high dispersion, causing a narrowing of spread of leftmost points in the plot.
+
+```{r plotMA}
+plotMA(res, alpha=0.05, main=sprintf(output_basename), ylim=c(-1,1))
+```
+
+
+### Independant Filtering
+For weakly expressed genes, we have no chance of seeing differential expression, because the low read counts suffer from so high Poisson noise that any biological effect is drowned in the uncertainties from the read counting. By removing the weakly-expressed genes from the input to the FDR procedure, we can find more genes to be significant among those which we keep, and so improved the power of our test. This approach is known as _independent filtering_.
+
+The DESeq2 software automatically performs independent filtering which maximizes the number of genes which will have adjusted $p$ value less than a critical value (by default, alpha is set to 0.1). This automatic independent filtering is performed by, and can be controlled by, the `results` function. We can observe how the number of rejections changes for various cutoffs based on mean normalized count. The following optimal threshold and table of possible values is stored as an attribute of the results object.
+
+```{r independent_filtering}
+metadata(res)$alpha
+metadata(res)$filterThreshold
+plot(metadata(res)$filterNumRej,
+     type="b", ylab="number of rejections",
+     xlab="quantiles of filter")
+lines(metadata(res)$lo.fit, col="red")
+abline(v=metadata(res)$filterTheta)
+```
