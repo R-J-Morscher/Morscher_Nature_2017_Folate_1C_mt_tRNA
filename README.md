@@ -1,5 +1,5 @@
 # Morscher_et al. 2018
-The following provides all R and Python scripts used to analyze next generation sequencing datasets in: Morscher R. J., et al. Mitochondrial translation requires folate-dependent tRNA methylation. Nature (2017).
+The following provides all R and Python scripts used to analyze next generation sequencing datasets in: Morscher R. J., et al. Mitochondrial translation requires folate-dependent tRNA methylation.
 
 ## Table of contents
 ### 1.	Code_Disclosure_mtDNA_coverage_and_variants
